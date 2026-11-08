@@ -13,7 +13,7 @@ provider:
 
 functions:
   scrape_sismos:
-    handler: scrape_sismos.lambda_handler
+    handler: scrape_sismo.lambda_handler
     package:
       include:
         - ./**
