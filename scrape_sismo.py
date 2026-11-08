@@ -1,97 +1,72 @@
-
 import requests
-from bs4 import BeautifulSoup
 import boto3
 import uuid
 import json
+from datetime import datetime
 
 
 def lambda_handler(event, context):
 
-    # URL de la página web del IGP
-    url = "https://ultimosismo.igp.gob.pe/productos/reportes-sismicos"
+    # La página del IGP arma su tabla con JavaScript, pero los datos salen de
+    # esta API JSON (un arreglo con todos los reportes del año):
+    # https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/<año>
+    url_base = "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/"
 
-    # Realizar la solicitud HTTP a la página web
-    response = requests.get(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=25
-    )
+    anio = datetime.now().year
+    sismos = []
 
-    if response.status_code != 200:
-        return {
-            'statusCode': response.status_code,
-            'body': 'Error al acceder a la página web'
-        }
+    # Se consulta el año actual y, si aún no hay 10 reportes
+    # (por ejemplo a inicios de enero), también el año anterior
+    for anio_consulta in [anio, anio - 1]:
 
-    # Parsear el contenido HTML de la página web
-    soup = BeautifulSoup(response.content, 'html.parser')
+        response = requests.get(
+            url_base + str(anio_consulta),
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=25
+        )
 
-    # Encontrar la tabla que contiene los reportes sísmicos
-    table = None
+        if response.status_code != 200:
+            return {
+                'statusCode': response.status_code,
+                'body': 'Error al acceder a la API del IGP'
+            }
 
-    for current_table in soup.find_all('table'):
+        sismos.extend(response.json())
 
-        headers = [
-            header.get_text(" ", strip=True)
-            for header in current_table.find_all('th')
-        ]
-
-        if any('Cod reporte' in header for header in headers):
-            table = current_table
+        if len(sismos) >= 10:
             break
 
-    if not table:
-        return {
-            'statusCode': 404,
-            'body': 'No se encontró la tabla de reportes sísmicos'
-        }
-
-    # Extraer los encabezados de la tabla
-    headers = [
-        header.get_text(" ", strip=True)
-        for header in table.find_all('th')
-    ]
-
-    # Extraer las primeras 10 filas
-    rows = []
-
-    for row in table.find_all('tr'):
-
-        cells = row.find_all('td')
-
-        if not cells:
-            continue
-
-        # Extraer los datos de cada celda
-        values = [
-            cell.get_text(" ", strip=True)
-            for cell in cells
-        ]
-
-        if len(values) != len(headers):
-            continue
-
-        # Crear un diccionario con encabezados y valores
-        data = dict(zip(headers, values))
-
-        # Extraer el enlace del reporte sísmico
-        link = row.find('a', href=True)
-
-        if link:
-            data['url_reporte'] = link['href']
-
-        rows.append(data)
-
-        # Limitar a los 10 últimos sismos
-        if len(rows) == 10:
-            break
-
-    if not rows:
+    if not sismos:
         return {
             'statusCode': 404,
             'body': 'No se encontraron registros sísmicos'
         }
+
+    # La API devuelve del más antiguo al más reciente:
+    # se ordena de forma descendente y se toman los 10 últimos sismos
+    sismos.sort(key=lambda s: s.get('idlistasismos', 0), reverse=True)
+    sismos = sismos[:10]
+
+    # Armar las filas que se guardarán (misma idea de la tabla de clase)
+    rows = []
+    i = 1
+
+    for s in sismos:
+        rows.append({
+            'id': str(uuid.uuid4()),
+            '#': i,
+            'Cod reporte': s.get('codigo', ''),
+            'Referencia': s.get('referencia', ''),
+            'Magnitud': s.get('magnitud', ''),
+            'Profundidad': s.get('profundidad', ''),
+            'Latitud': s.get('latitud', ''),
+            'Longitud': s.get('longitud', ''),
+            'Intensidad': s.get('intensidad', ''),
+            'Fecha local': s.get('fecha_local', '')[:10],
+            'Hora local': s.get('hora_local', '')[11:19],
+            'Reporte PDF': s.get('reporte_acelerometrico_pdf', '')
+        })
+        i = i + 1
 
     # Guardar los datos en DynamoDB
     dynamodb = boto3.resource('dynamodb')
@@ -110,16 +85,8 @@ def lambda_handler(event, context):
             )
 
     # Insertar los nuevos datos
-    i = 1
-
     for row in rows:
-
-        row['#'] = i
-        row['id'] = str(uuid.uuid4())
-
         table.put_item(Item=row)
-
-        i = i + 1
 
     # Retornar el resultado como JSON
     return {
